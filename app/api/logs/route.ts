@@ -1,18 +1,19 @@
-import { Redis } from "@upstash/redis";
+import Redis from "ioredis";
 import { NextResponse } from "next/server";
 
-// Fallback chain to ensure we bind to whichever environment keys Vercel generated
-const redisUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
-const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+// Fallback to your hardcoded Redis Cloud URL if the environment variable is not defined
+const redisUrl = process.env.REDIS_URL || "redis://default:khRyqWekqbdjvwaILW4jsXrIFUEKAqs6@zipper-formal-cover-24405.db.redis.io:13961";
 
-if (!redisUrl || !redisToken) {
-  console.warn("⚠️ Redis Environment variables are missing. App is running in fallback local mode.");
+let redis: Redis;
+
+try {
+  redis = new Redis(redisUrl, {
+    maxRetriesPerRequest: 1,
+    connectTimeout: 10000,
+  });
+} catch (error) {
+  console.error("Failed to initialize Redis:", error);
 }
-
-const redis = new Redis({
-  url: redisUrl || "",
-  token: redisToken || "",
-});
 
 // GET /api/logs?code=your-sync-code
 export async function GET(request: Request) {
@@ -25,13 +26,12 @@ export async function GET(request: Request) {
   try {
     const data = await redis.get(`baby_tracker_${code.toLowerCase()}`);
     
-    // Safely deserialize string payloads if stored as raw strings
-    let payload = data;
-    if (typeof data === "string") {
+    let payload = null;
+    if (data) {
       try {
         payload = JSON.parse(data);
-      } catch {
-        // Fallback if data is not JSON string
+      } catch (e) {
+        console.error("Error parsing string from Redis:", e);
       }
     }
 
@@ -52,12 +52,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing sync code" }, { status: 400 });
     }
 
-    await redis.set(`baby_tracker_${code.toLowerCase()}`, {
+    // Traditional Redis saves standard values as strings, so we serialize object logs here
+    const payloadString = JSON.stringify({
       feedLog,
       peeLog,
       poopLog,
       lastReset,
     });
+
+    await redis.set(`baby_tracker_${code.toLowerCase()}`, payloadString);
 
     return NextResponse.json({ success: true });
   } catch (error) {

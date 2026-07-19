@@ -1,8 +1,7 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
-// TIME UTILITIES FORCE-CALIBRATED TO GMT+8 (Asia/Singapore)
 const formatSGDate = (date: Date): string => {
   return new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Singapore",
@@ -21,7 +20,6 @@ const formatSGTime = (date: Date): string => {
   }).format(date);
 };
 
-// Returns the SG time split into pieces
 const getSGTimeParts = (date: Date) => {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Singapore",
@@ -42,7 +40,7 @@ const getSGTimeParts = (date: Date) => {
   });
   return {
     year: map.year,
-    month: map.month - 1, // 0-indexed month
+    month: map.month - 1,
     day: map.day,
     hour: map.hour,
     minute: map.minute,
@@ -50,7 +48,6 @@ const getSGTimeParts = (date: Date) => {
   };
 };
 
-// Converts an epoch timestamp to a 24-hour time string "HH:MM" in Singapore timezone
 const getSG24hTime = (timestamp: number): string => {
   const d = new Date(timestamp);
   const formatter = new Intl.DateTimeFormat("en-US", {
@@ -70,14 +67,12 @@ const getSG24hTime = (timestamp: number): string => {
   return `${h}:${m}`;
 };
 
-// Calculates the timestamp (UTC milliseconds) of the most recent 08:00 AM Singapore time
 const getSGResetTimestamp = (date: Date): number => {
   const sg = getSGTimeParts(date);
   let targetYear = sg.year;
   let targetMonth = sg.month;
   let targetDay = sg.day;
 
-  // If the Singapore hour is before 8:00 AM, the reset period dates back to yesterday's 8:00 AM
   if (sg.hour < 8) {
     const prevDate = new Date(Date.UTC(sg.year, sg.month, sg.day - 1));
     targetYear = prevDate.getUTCFullYear();
@@ -85,7 +80,6 @@ const getSGResetTimestamp = (date: Date): number => {
     targetDay = prevDate.getUTCDate();
   }
 
-  // 08:00 AM Singapore time always aligns exactly with 00:00:00 UTC on the target day
   return Date.UTC(targetYear, targetMonth, targetDay, 0, 0, 0);
 };
 
@@ -93,65 +87,47 @@ export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
 
-  // Core Data Logs (Epoch timestamps)
+  // Core Data Logs
   const [feedLog, setFeedLog] = useState<number[]>([]);
   const [peeLog, setPeeLog] = useState<number[]>([]);
   const [poopLog, setPoopLog] = useState<number[]>([]);
-
-  // Feed Interval Option (Whole number from 1 to 10)
   const [feedIntervalInput, setFeedIntervalInput] = useState<string>("3");
+
+  // Sync / Cloud States
+  const [syncCode, setSyncCode] = useState<string>("");
+  const [syncInput, setSyncInput] = useState<string>("");
+  const [syncStatus, setSyncStatus] = useState<"local" | "syncing" | "synced" | "error">("local");
 
   // Inline Editing State for Feeds
   const [editingFeedIndex, setEditingFeedIndex] = useState<number | null>(null);
   const [editTimeValue, setEditTimeValue] = useState<string>("");
 
-  // Load state and evaluate daily 08:00 AM boundary triggers
+  // Keep ref of logs to prevent closure races during sync fetches
+  const stateRef = useRef({ feedLog, peeLog, poopLog, syncCode });
+  useEffect(() => {
+    stateRef.current = { feedLog, peeLog, poopLog, syncCode };
+  }, [feedLog, peeLog, poopLog, syncCode]);
+
+  // Initial local or cloud setup
   useEffect(() => {
     const now = new Date();
     setCurrentTime(now);
 
-    const activeResetBound = getSGResetTimestamp(now);
-    const storedResetBound = localStorage.getItem("io_chart_last_reset");
-
-    let shouldClear = false;
-
-    if (storedResetBound) {
-      const lastReset = parseInt(storedResetBound, 10);
-      if (activeResetBound > lastReset) {
-        shouldClear = true;
-      }
+    const savedCode = localStorage.getItem("io_chart_sync_code") || "";
+    if (savedCode) {
+      setSyncCode(savedCode);
+      setSyncInput(savedCode);
+      fetchFromCloud(savedCode);
     } else {
-      localStorage.setItem("io_chart_last_reset", activeResetBound.toString());
-    }
-
-    if (shouldClear) {
-      // Clear data for the new day starting at 08:00 AM
-      localStorage.setItem("io_chart_feed_log", JSON.stringify([]));
-      localStorage.setItem("io_chart_pee_log", JSON.stringify([]));
-      localStorage.setItem("io_chart_poop_log", JSON.stringify([]));
-      localStorage.setItem("io_chart_last_reset", activeResetBound.toString());
-      setFeedLog([]);
-      setPeeLog([]);
-      setPoopLog([]);
-    } else {
-      // Load saved logs
-      const savedFeeds = localStorage.getItem("io_chart_feed_log");
-      const savedPees = localStorage.getItem("io_chart_pee_log");
-      const savedPoops = localStorage.getItem("io_chart_poop_log");
-      const savedInterval = localStorage.getItem("io_chart_feed_interval");
-
-      if (savedFeeds) setFeedLog(JSON.parse(savedFeeds));
-      if (savedPees) setPeeLog(JSON.parse(savedPees));
-      if (savedPoops) setPoopLog(JSON.parse(savedPoops));
-      if (savedInterval) setFeedIntervalInput(savedInterval);
+      loadLocalStorage(now);
     }
 
     setMounted(true);
   }, []);
 
-  // Update Clock & Periodic Check for 08:00 AM trigger
+  // Update Clock & 10s background sync poll
   useEffect(() => {
-    const interval = setInterval(() => {
+    const clockInterval = setInterval(() => {
       const now = new Date();
       setCurrentTime(now);
 
@@ -162,30 +138,142 @@ export default function Dashboard() {
         const lastReset = parseInt(storedResetBound, 10);
         if (activeResetBound > lastReset) {
           // Trigger automated clean-up
-          setFeedLog([]);
-          setPeeLog([]);
-          setPoopLog([]);
-          localStorage.setItem("io_chart_feed_log", JSON.stringify([]));
-          localStorage.setItem("io_chart_pee_log", JSON.stringify([]));
-          localStorage.setItem("io_chart_poop_log", JSON.stringify([]));
-          localStorage.setItem("io_chart_last_reset", activeResetBound.toString());
+          handleStateReset(activeResetBound);
         }
       }
     }, 1000);
 
-    return () => clearInterval(interval);
-  }, []);
+    const syncInterval = setInterval(() => {
+      if (stateRef.current.syncCode && editingFeedIndex === null) {
+        fetchFromCloud(stateRef.current.syncCode, true);
+      }
+    }, 10000);
 
-  // Sync log array data into local storage safely
-  const updateLog = (
-    type: "feed" | "pee" | "poop",
-    newLog: number[]
+    return () => {
+      clearInterval(clockInterval);
+      clearInterval(syncInterval);
+    };
+  }, [editingFeedIndex]);
+
+  const loadLocalStorage = (now: Date) => {
+    const activeResetBound = getSGResetTimestamp(now);
+    const storedResetBound = localStorage.getItem("io_chart_last_reset");
+    let shouldClear = false;
+
+    if (storedResetBound) {
+      if (activeResetBound > parseInt(storedResetBound, 10)) {
+        shouldClear = true;
+      }
+    } else {
+      localStorage.setItem("io_chart_last_reset", activeResetBound.toString());
+    }
+
+    if (shouldClear) {
+      handleStateReset(activeResetBound, false);
+    } else {
+      const savedFeeds = localStorage.getItem("io_chart_feed_log");
+      const savedPees = localStorage.getItem("io_chart_pee_log");
+      const savedPoops = localStorage.getItem("io_chart_poop_log");
+      const savedInterval = localStorage.getItem("io_chart_feed_interval");
+
+      if (savedFeeds) setFeedLog(JSON.parse(savedFeeds));
+      if (savedPees) setPeeLog(JSON.parse(savedPees));
+      if (savedPoops) setPoopLog(JSON.parse(savedPoops));
+      if (savedInterval) setFeedIntervalInput(savedInterval);
+    }
+  };
+
+  const handleStateReset = (resetTime: number, updateCloud = true) => {
+    setFeedLog([]);
+    setPeeLog([]);
+    setPoopLog([]);
+    localStorage.setItem("io_chart_feed_log", JSON.stringify([]));
+    localStorage.setItem("io_chart_pee_log", JSON.stringify([]));
+    localStorage.setItem("io_chart_poop_log", JSON.stringify([]));
+    localStorage.setItem("io_chart_last_reset", resetTime.toString());
+
+    if (updateCloud && stateRef.current.syncCode) {
+      pushToCloud(stateRef.current.syncCode, [], [], [], resetTime);
+    }
+  };
+
+  // Cloud Database Interactions
+  const fetchFromCloud = async (code: string, isSilent = false) => {
+    if (!isSilent) setSyncStatus("syncing");
+    try {
+      const res = await fetch(`/api/logs?code=${encodeURIComponent(code)}`);
+      if (!res.ok) throw new Error("Fetch failed");
+      const data = await res.json();
+
+      const activeResetBound = getSGResetTimestamp(new Date());
+
+      if (data.lastReset && activeResetBound > data.lastReset) {
+        // Daily limit reached, clear database and state
+        handleStateReset(activeResetBound, true);
+      } else {
+        setFeedLog(data.feedLog || []);
+        setPeeLog(data.peeLog || []);
+        setPoopLog(data.poopLog || []);
+
+        localStorage.setItem("io_chart_feed_log", JSON.stringify(data.feedLog || []));
+        localStorage.setItem("io_chart_pee_log", JSON.stringify(data.peeLog || []));
+        localStorage.setItem("io_chart_poop_log", JSON.stringify(data.poopLog || []));
+        if (data.lastReset) {
+          localStorage.setItem("io_chart_last_reset", data.lastReset.toString());
+        }
+      }
+      setSyncStatus("synced");
+    } catch (e) {
+      console.error(e);
+      setSyncStatus("error");
+    }
+  };
+
+  const pushToCloud = async (
+    code: string,
+    f: number[],
+    pe: number[],
+    po: number[],
+    resetTime?: number
   ) => {
+    setSyncStatus("syncing");
+    try {
+      const rTime = resetTime || parseInt(localStorage.getItem("io_chart_last_reset") || "0", 10);
+      const res = await fetch("/api/logs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code,
+          feedLog: f,
+          peeLog: pe,
+          poopLog: po,
+          lastReset: rTime,
+        }),
+      });
+      if (!res.ok) throw new Error("Push failed");
+      setSyncStatus("synced");
+    } catch (e) {
+      console.error(e);
+      setSyncStatus("error");
+    }
+  };
+
+  // State log updates (handles dual local + cloud targets)
+  const updateLog = (type: "feed" | "pee" | "poop", newLog: number[]) => {
     const key = `io_chart_${type}_log`;
     localStorage.setItem(key, JSON.stringify(newLog));
-    if (type === "feed") setFeedLog(newLog);
-    if (type === "pee") setPeeLog(newLog);
-    if (type === "poop") setPoopLog(newLog);
+
+    let f = feedLog;
+    let pe = peeLog;
+    let po = poopLog;
+
+    if (type === "feed") { setFeedLog(newLog); f = newLog; }
+    if (type === "pee") { setPeeLog(newLog); pe = newLog; }
+    if (type === "poop") { setPoopLog(newLog); po = newLog; }
+
+    if (syncCode) {
+      pushToCloud(syncCode, f, pe, po);
+    }
   };
 
   const handleIncrement = (type: "feed" | "pee" | "poop") => {
@@ -211,18 +299,30 @@ export default function Dashboard() {
     }
   };
 
+  const handleConnectSync = () => {
+    const code = syncInput.trim().toLowerCase();
+    if (code) {
+      setSyncCode(code);
+      localStorage.setItem("io_chart_sync_code", code);
+      fetchFromCloud(code);
+    } else {
+      setSyncCode("");
+      localStorage.removeItem("io_chart_sync_code");
+      setSyncStatus("local");
+      loadLocalStorage(new Date());
+    }
+  };
+
   const handleIntervalChange = (val: string) => {
     setFeedIntervalInput(val);
     localStorage.setItem("io_chart_feed_interval", val);
   };
 
-  // Trigger inline editing for a feed log index
   const startEditingFeed = (index: number) => {
     setEditingFeedIndex(index);
     setEditTimeValue(getSG24hTime(feedLog[index]));
   };
 
-  // Save the retrospectively edited feed timestamp
   const saveEditedFeed = (index: number) => {
     const originalTimestamp = feedLog[index];
     const sgParts = getSGTimeParts(new Date(originalTimestamp));
@@ -231,27 +331,22 @@ export default function Dashboard() {
     const hours = parseInt(hoursStr, 10);
     const minutes = parseInt(minutesStr, 10);
 
-    // Compute UTC equivalent base: local SG time = UTC + 8 -> UTC time = local SG time - 8 hours
     const utcBase = Date.UTC(sgParts.year, sgParts.month, sgParts.day, hours, minutes, 0);
     const newSGEpoch = utcBase - 8 * 60 * 60 * 1000;
 
     const updatedLog = [...feedLog];
     updatedLog[index] = newSGEpoch;
-
-    // Sort chronologically in case parent changed order
     updatedLog.sort((a, b) => a - b);
 
     updateLog("feed", updatedLog);
     setEditingFeedIndex(null);
   };
 
-  // Safe parsed interval for display math (fallback to 3 if input is invalid or out of bounds)
   const parsedInterval = parseInt(feedIntervalInput, 10);
   const validInterval = !isNaN(parsedInterval) && parsedInterval >= 1 && parsedInterval <= 10
     ? parsedInterval
     : 3;
 
-  // Next feed timing calculations
   const calculateNextFeed = (): string => {
     if (feedLog.length === 0) return "Not scheduled";
     const lastFeedTime = feedLog[feedLog.length - 1];
@@ -259,7 +354,6 @@ export default function Dashboard() {
     return formatSGTime(nextFeedDate);
   };
 
-  // Safeguard view against server-side rendering mismatch
   if (!mounted || !currentTime) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen text-stone-400 p-6 space-y-2">
@@ -289,53 +383,73 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Info indicator */}
-      <div className="mb-6 flex items-center justify-between text-xs text-stone-400 font-medium bg-stone-50 border border-stone-200/50 rounded-xl px-4 py-2.5">
-        <span>🔄 Dashboard automatically resets daily at 08:00 AM (GMT+8)</span>
+      {/* Sync Management Panel */}
+      <div className="mb-6 bg-stone-50 border border-stone-200/60 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="relative flex h-3 w-3">
+            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+              syncStatus === "synced" ? "bg-emerald-400" : syncStatus === "syncing" ? "bg-amber-400" : syncStatus === "error" ? "bg-rose-400" : "bg-stone-400"
+            }`}></span>
+            <span className={`relative inline-flex rounded-full h-3 w-3 ${
+              syncStatus === "synced" ? "bg-emerald-500" : syncStatus === "syncing" ? "bg-amber-500" : syncStatus === "error" ? "bg-rose-500" : "bg-stone-500"
+            }`}></span>
+          </span>
+          <span className="text-xs font-semibold text-stone-600">
+            {syncStatus === "synced" && `Synced with code: "${syncCode}"`}
+            {syncStatus === "syncing" && "Syncing with cloud..."}
+            {syncStatus === "error" && "Sync connection error."}
+            {syncStatus === "local" && "Offline / Local-only mode"}
+          </span>
+        </div>
+        
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="Enter Sync Code..."
+            value={syncInput}
+            onChange={(e) => setSyncInput(e.target.value)}
+            className="text-xs font-bold px-3 py-2 border border-stone-200 rounded-xl bg-white w-full md:w-48 text-stone-700 placeholder-stone-400 focus:outline-none"
+          />
+          <button
+            onClick={handleConnectSync}
+            className="text-xs bg-stone-800 text-white font-bold px-4 py-2 rounded-xl hover:bg-stone-700 active:scale-95 transition-all"
+          >
+            {syncCode ? "Disconnect" : "Connect"}
+          </button>
+        </div>
       </div>
 
       {/* 3 Main Grid Sections */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
 
-        {/* 1. FEEDING SECTION (Color Theme: #FAE1DD) */}
+        {/* 1. FEEDING SECTION */}
         <section className="bg-[#FAE1DD] border border-[#ECD1CD] rounded-3xl p-6 flex flex-col shadow-sm">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-stone-800 flex items-center gap-2">
-              🍼 Feeding
-            </h2>
-            <span className="bg-[#F5CECA] text-[#863730] text-xs font-bold px-2.5 py-1 rounded-full">
-              Feed Counter
-            </span>
+            <h2 className="text-lg font-bold text-stone-800 flex items-center gap-2">🍼 Feeding</h2>
+            <span className="bg-[#F5CECA] text-[#863730] text-xs font-bold px-2.5 py-1 rounded-full">Feed Counter</span>
           </div>
 
-          {/* Large display counter */}
           <div className="text-center my-6">
-            <div className="text-6xl font-black text-[#863730] tabular-nums">
-              {feedLog.length}
-            </div>
+            <div className="text-6xl font-black text-[#863730] tabular-nums">{feedLog.length}</div>
             <p className="text-xs text-[#863730]/80 font-medium mt-1">feeds today</p>
           </div>
 
-          {/* Massive Mobile-Optimized Action Buttons */}
           <div className="grid grid-cols-2 gap-4 mb-6">
             <button
               onClick={() => handleDecrement("feed")}
               disabled={feedLog.length === 0}
               className="h-18 md:h-22 bg-white/80 hover:bg-white active:scale-95 disabled:opacity-40 disabled:hover:bg-white/80 disabled:pointer-events-none border border-[#E9C4BF] rounded-2xl text-[#863730] font-black text-3xl transition-all shadow-sm flex items-center justify-center"
-              title="Decrease feed"
             >
               −
             </button>
             <button
               onClick={() => handleIncrement("feed")}
               className="h-18 md:h-22 bg-[#F7CECA] hover:bg-[#F2BDBC] active:scale-95 rounded-2xl text-[#6D2721] font-black text-3xl transition-all shadow-sm flex items-center justify-center"
-              title="Increase feed"
             >
               +
             </button>
           </div>
 
-          {/* Log List with Inline Time Editor */}
           <div className="flex-1 bg-white/65 rounded-2xl p-4 border border-[#ECD1CD]/50 min-h-[140px] max-h-[160px] overflow-y-auto mb-6">
             <span className="text-xs font-semibold text-stone-400 uppercase tracking-wide block mb-2">Logs</span>
             {feedLog.length === 0 ? (
@@ -352,17 +466,17 @@ export default function Dashboard() {
                             type="time"
                             value={editTimeValue}
                             onChange={(e) => setEditTimeValue(e.target.value)}
-                            className="text-xs font-bold px-2 py-1 border border-stone-300 rounded bg-white text-stone-800 focus:outline-none focus:ring-1 focus:ring-[#863730]"
+                            className="text-xs font-bold px-2 py-1 border border-stone-300 rounded bg-white text-stone-800 focus:outline-none"
                           />
                           <button
                             onClick={() => saveEditedFeed(index)}
-                            className="text-[10px] bg-[#863730] text-white font-bold px-2 py-1 rounded hover:bg-[#6D2721]"
+                            className="text-[10px] bg-[#863730] text-white font-bold px-2 py-1 rounded"
                           >
                             Save
                           </button>
                           <button
                             onClick={() => setEditingFeedIndex(null)}
-                            className="text-[10px] text-stone-500 hover:text-stone-700 font-bold px-1"
+                            className="text-[10px] text-stone-500 font-bold px-1"
                           >
                             Cancel
                           </button>
@@ -377,7 +491,7 @@ export default function Dashboard() {
                           </span>
                           <button
                             onClick={() => startEditingFeed(index)}
-                            className="text-[10px] bg-white/90 hover:bg-white text-stone-500 hover:text-stone-800 px-2 py-0.5 rounded border border-stone-200 shadow-sm font-semibold"
+                            className="text-[10px] bg-white/90 hover:bg-white text-stone-500 px-2 py-0.5 rounded border border-stone-200 font-semibold"
                           >
                             Edit
                           </button>
@@ -390,20 +504,14 @@ export default function Dashboard() {
             )}
           </div>
 
-          {/* Calculated Next Planned Feed Section */}
           <div className="border-t border-[#ECD1CD]/70 pt-4 mt-auto">
             <div className="bg-white/50 border border-[#F5C9C4] rounded-2xl p-3 text-center">
               <span className="text-xs font-semibold text-[#863730]/80 uppercase tracking-wider block">Next Feed Due</span>
-              <span className="text-base font-black text-[#6D2721] block mt-1">
-                {calculateNextFeed()}
-              </span>
+              <span className="text-base font-black text-[#6D2721] block mt-1">{calculateNextFeed()}</span>
             </div>
 
-            {/* Interval modifier custom input */}
             <div className="mt-4 flex items-center justify-between gap-2">
-              <label htmlFor="feed-interval" className="text-xs text-stone-600 font-semibold">
-                Interval (1-10 hrs):
-              </label>
+              <label htmlFor="feed-interval" className="text-xs text-stone-600 font-semibold">Interval (1-10 hrs):</label>
               <input
                 id="feed-interval"
                 type="number"
@@ -412,58 +520,41 @@ export default function Dashboard() {
                 step="1"
                 value={feedIntervalInput}
                 onChange={(e) => handleIntervalChange(e.target.value)}
-                className="w-16 text-center text-xs font-bold py-1.5 px-2 bg-white border border-stone-200 focus:outline-none focus:ring-1 focus:ring-[#863730] rounded-lg text-stone-700"
-                placeholder="3"
+                className="w-16 text-center text-xs font-bold py-1.5 px-2 bg-white border border-stone-200 focus:outline-none rounded-lg text-stone-700"
               />
             </div>
-            {(!feedIntervalInput || isNaN(parsedInterval) || parsedInterval < 1 || parsedInterval > 10) && (
-              <p className="text-[10px] text-red-600 font-medium mt-1.5 text-right">
-                Please enter a whole number from 1 to 10
-              </p>
-            )}
           </div>
         </section>
 
 
-        {/* 2. PEEING SECTION (Color Theme: #D8E2DC) */}
+        {/* 2. PEEING SECTION */}
         <section className="bg-[#D8E2DC] border border-[#CAD4CE] rounded-3xl p-6 flex flex-col shadow-sm">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-stone-800 flex items-center gap-2">
-              💧 Peeing
-            </h2>
-            <span className="bg-[#CAD4CE] text-[#3E5C56] text-xs font-bold px-2.5 py-1 rounded-full">
-              Pee Counter
-            </span>
+            <h2 className="text-lg font-bold text-stone-800 flex items-center gap-2">💧 Peeing</h2>
+            <span className="bg-[#CAD4CE] text-[#3E5C56] text-xs font-bold px-2.5 py-1 rounded-full">Pee Counter</span>
           </div>
 
-          {/* Large display counter */}
           <div className="text-center my-6">
-            <div className="text-6xl font-black text-[#3E5C56] tabular-nums">
-              {peeLog.length}
-            </div>
+            <div className="text-6xl font-black text-[#3E5C56] tabular-nums">{peeLog.length}</div>
             <p className="text-xs text-[#3E5C56]/80 font-medium mt-1">occurrences today</p>
           </div>
 
-          {/* Massive Mobile-Optimized Action Buttons */}
           <div className="grid grid-cols-2 gap-4 mb-6">
             <button
               onClick={() => handleDecrement("pee")}
               disabled={peeLog.length === 0}
               className="h-18 md:h-22 bg-white/80 hover:bg-white active:scale-95 disabled:opacity-40 disabled:hover:bg-white/80 disabled:pointer-events-none border border-[#C6D1CA] rounded-2xl text-[#3E5C56] font-black text-3xl transition-all shadow-sm flex items-center justify-center"
-              title="Decrease pee"
             >
               −
             </button>
             <button
               onClick={() => handleIncrement("pee")}
               className="h-18 md:h-22 bg-[#CAD4CE] hover:bg-[#BEC8C2] active:scale-95 rounded-2xl text-[#2F4440] font-black text-3xl transition-all shadow-sm flex items-center justify-center"
-              title="Increase pee"
             >
               +
             </button>
           </div>
 
-          {/* Log List */}
           <div className="flex-1 bg-white/65 rounded-2xl p-4 border border-[#CAD4CE]/50 min-h-[140px] max-h-[160px] overflow-y-auto">
             <span className="text-xs font-semibold text-stone-400 uppercase tracking-wide block mb-2">Logs</span>
             {peeLog.length === 0 ? (
@@ -482,45 +573,34 @@ export default function Dashboard() {
         </section>
 
 
-        {/* 3. POOING SECTION (Color Theme: #F8EDEB) */}
+        {/* 3. POOING SECTION */}
         <section className="bg-[#F8EDEB] border border-[#ECE0DE] rounded-3xl p-6 flex flex-col shadow-sm">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-bold text-stone-800 flex items-center gap-2">
-              💩 Pooing
-            </h2>
-            <span className="bg-[#EFE2DF] text-[#7A5853] text-xs font-bold px-2.5 py-1 rounded-full">
-              Poo Counter
-            </span>
+            <h2 className="text-lg font-bold text-stone-800 flex items-center gap-2">💩 Pooing</h2>
+            <span className="bg-[#EFE2DF] text-[#7A5853] text-xs font-bold px-2.5 py-1 rounded-full">Poo Counter</span>
           </div>
 
-          {/* Large display counter */}
           <div className="text-center my-6">
-            <div className="text-6xl font-black text-[#7A5853] tabular-nums">
-              {poopLog.length}
-            </div>
+            <div className="text-6xl font-black text-[#7A5853] tabular-nums">{poopLog.length}</div>
             <p className="text-xs text-[#7A5853]/80 font-medium mt-1">occurrences today</p>
           </div>
 
-          {/* Massive Mobile-Optimized Action Buttons */}
           <div className="grid grid-cols-2 gap-4 mb-6">
             <button
               onClick={() => handleDecrement("poop")}
               disabled={poopLog.length === 0}
               className="h-18 md:h-22 bg-white/80 hover:bg-white active:scale-95 disabled:opacity-40 disabled:hover:bg-white/80 disabled:pointer-events-none border border-[#E9DAD8] rounded-2xl text-[#7A5853] font-black text-3xl transition-all shadow-sm flex items-center justify-center"
-              title="Decrease poo"
             >
               −
             </button>
             <button
               onClick={() => handleIncrement("poop")}
               className="h-18 md:h-22 bg-[#EFE2DF] hover:bg-[#E3D4D1] active:scale-95 rounded-2xl text-[#533935] font-black text-3xl transition-all shadow-sm flex items-center justify-center"
-              title="Increase poo"
             >
               +
             </button>
           </div>
 
-          {/* Log List */}
           <div className="flex-1 bg-white/65 rounded-2xl p-4 border border-[#ECE0DE]/50 min-h-[140px] max-h-[160px] overflow-y-auto">
             <span className="text-xs font-semibold text-stone-400 uppercase tracking-wide block mb-2">Logs</span>
             {poopLog.length === 0 ? (
