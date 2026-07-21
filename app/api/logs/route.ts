@@ -1,7 +1,6 @@
 import Redis from "ioredis";
 import { NextResponse } from "next/server";
 
-// Fallback to your hardcoded Redis Cloud URL if the environment variable is not defined
 const redisUrl = process.env.REDIS_URL || "redis://default:khRyqWekqbdjvwaILW4jsXrIFUEKAqs6@zipper-formal-cover-24405.db.redis.io:13961";
 
 let redis: Redis;
@@ -35,7 +34,14 @@ export async function GET(request: Request) {
       }
     }
 
-    return NextResponse.json(payload || { feedLog: [], peeLog: [], poopLog: [], lastReset: 0 });
+    return NextResponse.json(payload || { 
+      feedLog: [], 
+      peeLog: [], 
+      poopLog: [], 
+      lastReset: 0,
+      lastPoopTimestamp: null,
+      historicalLastPoop: null
+    });
   } catch (error) {
     console.error("Database read error:", error);
     return NextResponse.json({ error: "Failed to read data" }, { status: 500 });
@@ -46,18 +52,19 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { code, feedLog, peeLog, poopLog, lastReset } = body;
+    const { code, feedLog, peeLog, poopLog, lastReset, lastPoopTimestamp, historicalLastPoop } = body;
 
     if (!code) {
       return NextResponse.json({ error: "Missing sync code" }, { status: 400 });
     }
 
-    // Traditional Redis saves standard values as strings, so we serialize object logs here
     const payloadString = JSON.stringify({
       feedLog,
       peeLog,
       poopLog,
       lastReset,
+      lastPoopTimestamp,
+      historicalLastPoop
     });
 
     await redis.set(`baby_tracker_${code.toLowerCase()}`, payloadString);
