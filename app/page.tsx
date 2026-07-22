@@ -141,7 +141,9 @@ export default function Dashboard() {
       if (storedResetBound) {
         const lastReset = parseInt(storedResetBound, 10);
         if (activeResetBound > lastReset) {
-          handleStateReset(activeResetBound);
+          // Reset local active states only.
+          // In sync mode, the server handles resetting the DB cleanly.
+          handleStateResetLocal(activeResetBound);
         }
       }
     }, 1000);
@@ -172,10 +174,8 @@ export default function Dashboard() {
     }
 
     if (shouldClear) {
-      // If clearing, preserve absolute last poop details
-      const prevLastPoop = localStorage.getItem("io_chart_last_poop_timestamp");
-      const savedLastPoop = prevLastPoop ? parseInt(prevLastPoop, 10) : null;
-      handleStateReset(activeResetBound, false, savedLastPoop);
+      // Local-only reset routine
+      handleStateResetLocal(activeResetBound);
     } else {
       const savedFeeds = localStorage.getItem("io_chart_feed_log");
       const savedPees = localStorage.getItem("io_chart_pee_log");
@@ -195,7 +195,7 @@ export default function Dashboard() {
     }
   };
 
-  const handleStateReset = (resetTime: number, updateCloud = true, preservedPoop?: number | null) => {
+  const handleStateResetLocal = (resetTime: number) => {
     setFeedLog([]);
     setPeeLog([]);
     setPoopLog([]);
@@ -205,18 +205,13 @@ export default function Dashboard() {
     localStorage.setItem("io_chart_poop_log", JSON.stringify([]));
     localStorage.setItem("io_chart_last_reset", resetTime.toString());
 
-    // Carry forward the absolute last logged poop into the historical boundary
-    const finalPreservedPoop = preservedPoop !== undefined ? preservedPoop : stateRef.current.lastPoopTimestamp;
-    
+    // Carry forward pooping timestamps
+    const finalPreservedPoop = stateRef.current.lastPoopTimestamp;
     if (finalPreservedPoop) {
       setLastPoopTimestamp(finalPreservedPoop);
       setHistoricalLastPoop(finalPreservedPoop);
       localStorage.setItem("io_chart_last_poop_timestamp", finalPreservedPoop.toString());
       localStorage.setItem("io_chart_historical_poop", finalPreservedPoop.toString());
-    }
-
-    if (updateCloud && stateRef.current.syncCode) {
-      pushToCloud(stateRef.current.syncCode, [], [], [], resetTime, finalPreservedPoop, finalPreservedPoop);
     }
   };
 
@@ -228,39 +223,34 @@ export default function Dashboard() {
       if (!res.ok) throw new Error("Fetch failed");
       const data = await res.json();
 
-      const activeResetBound = getSGResetTimestamp(new Date());
+      // The server resolves any 08:00 AM reset checks securely and returns a safe payload
+      setFeedLog(data.feedLog || []);
+      setPeeLog(data.peeLog || []);
+      setPoopLog(data.poopLog || []);
 
-      if (data.lastReset && activeResetBound > data.lastReset) {
-        // Daily limit reached, clear database and state, preserve last poop
-        handleStateReset(activeResetBound, true, data.lastPoopTimestamp);
+      setLastPoopTimestamp(data.lastPoopTimestamp || null);
+      setHistoricalLastPoop(data.historicalLastPoop || null);
+
+      localStorage.setItem("io_chart_feed_log", JSON.stringify(data.feedLog || []));
+      localStorage.setItem("io_chart_pee_log", JSON.stringify(data.peeLog || []));
+      localStorage.setItem("io_chart_poop_log", JSON.stringify(data.poopLog || []));
+      
+      if (data.lastPoopTimestamp) {
+        localStorage.setItem("io_chart_last_poop_timestamp", data.lastPoopTimestamp.toString());
       } else {
-        setFeedLog(data.feedLog || []);
-        setPeeLog(data.peeLog || []);
-        setPoopLog(data.poopLog || []);
-
-        setLastPoopTimestamp(data.lastPoopTimestamp || null);
-        setHistoricalLastPoop(data.historicalLastPoop || null);
-
-        localStorage.setItem("io_chart_feed_log", JSON.stringify(data.feedLog || []));
-        localStorage.setItem("io_chart_pee_log", JSON.stringify(data.peeLog || []));
-        localStorage.setItem("io_chart_poop_log", JSON.stringify(data.poopLog || []));
-        
-        if (data.lastPoopTimestamp) {
-          localStorage.setItem("io_chart_last_poop_timestamp", data.lastPoopTimestamp.toString());
-        } else {
-          localStorage.removeItem("io_chart_last_poop_timestamp");
-        }
-
-        if (data.historicalLastPoop) {
-          localStorage.setItem("io_chart_historical_poop", data.historicalLastPoop.toString());
-        } else {
-          localStorage.removeItem("io_chart_historical_poop");
-        }
-
-        if (data.lastReset) {
-          localStorage.setItem("io_chart_last_reset", data.lastReset.toString());
-        }
+        localStorage.removeItem("io_chart_last_poop_timestamp");
       }
+
+      if (data.historicalLastPoop) {
+        localStorage.setItem("io_chart_historical_poop", data.historicalLastPoop.toString());
+      } else {
+        localStorage.removeItem("io_chart_historical_poop");
+      }
+
+      if (data.lastReset) {
+        localStorage.setItem("io_chart_last_reset", data.lastReset.toString());
+      }
+      
       setSyncStatus("synced");
     } catch (e) {
       console.error(e);
@@ -273,13 +263,12 @@ export default function Dashboard() {
     f: number[],
     pe: number[],
     po: number[],
-    resetTime?: number,
     lastPoop?: number | null,
     histPoop?: number | null
   ) => {
     setSyncStatus("syncing");
     try {
-      const rTime = resetTime || parseInt(localStorage.getItem("io_chart_last_reset") || "0", 10);
+      const rTime = parseInt(localStorage.getItem("io_chart_last_reset") || "0", 10);
       const lp = lastPoop !== undefined ? lastPoop : stateRef.current.lastPoopTimestamp;
       const hp = histPoop !== undefined ? histPoop : stateRef.current.historicalLastPoop;
 
@@ -346,7 +335,7 @@ export default function Dashboard() {
     }
 
     if (syncCode) {
-      pushToCloud(syncCode, f, pe, po, undefined, lp, hp);
+      pushToCloud(syncCode, f, pe, po, lp, hp);
     }
   };
 
@@ -358,7 +347,6 @@ export default function Dashboard() {
     
     if (type === "poop") {
       targetLog = [...poopLog, nowTimestamp];
-      // Increment sets today's last poop, historical remains unchanged
       updateLog(type, targetLog, nowTimestamp, historicalLastPoop);
     } else {
       targetLog.push(nowTimestamp);
@@ -376,11 +364,9 @@ export default function Dashboard() {
       targetLog.pop();
       if (type === "poop") {
         if (targetLog.length > 0) {
-          // If we still have poops logged today, the last poop reverts to today's previous logged poop
           const previousTodayPoop = targetLog[targetLog.length - 1];
           updateLog(type, targetLog, previousTodayPoop, historicalLastPoop);
         } else {
-          // Today's log is empty. Revert last poop to our cross-day historical memory
           updateLog(type, targetLog, historicalLastPoop, historicalLastPoop);
         }
       } else {
